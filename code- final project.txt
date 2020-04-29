@@ -1,0 +1,979 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+from scipy.stats import pearsonr
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import SGDRegressor
+import statsmodels.api as sm
+from sklearn.model_selection import GridSearchCV
+import seaborn as sns
+
+
+# In[2]:
+
+
+df = pd.read_csv('D:\mimic\ADMISSIONS.csv')
+
+
+# In[3]:
+
+
+df_diagcode=pd.read_csv('D:\mimic\DIAGNOSES_ICD.csv')
+
+
+# In[4]:
+
+
+df_icu=pd.read_csv('D:\mimic\ICUSTAYS.csv')
+
+
+# In[5]:
+
+
+df_pat=pd.read_csv('D:\mimic\PATIENTS.csv')
+
+
+# In[6]:
+
+
+print('Dataset has {} number of unique admission events.'.format(df['HADM_ID'].nunique()))
+print('Dataset has {} number of unique patients.'.format(df['SUBJECT_ID'].nunique()))
+
+
+# In[7]:
+
+
+
+print('Dataset has {} number of unique ICD9 codes .'.format(df_diagcode['ICD9_CODE'].nunique()))
+
+
+# In[70]:
+
+
+print('Dataset has {} number of admissions to ICU.'.format(df_icu['HADM_ID'].nunique()))
+
+
+# In[14]:
+
+
+#data exploration
+#ADMISSIONS
+#In order to calculate LOS, 
+#LOS = Time between admissions and discharge from hospital
+# Convert admission and discharge times to datatime type
+df['ADMITTIME'] = pd.to_datetime(df['ADMITTIME'])
+df['DISCHTIME'] = pd.to_datetime(df['DISCHTIME'])
+
+# Convert timedelta type into float 'days', 86400 seconds in a day
+df['LOS'] = (df['DISCHTIME'] - df['ADMITTIME']).dt.total_seconds()/86400
+
+
+# In[15]:
+
+
+df[['ADMITTIME', 'DISCHTIME', 'LOS']].head()
+
+
+# In[16]:
+
+
+df[df['LOS'] < 0]
+
+
+# In[17]:
+
+
+df[df['LOS'] > 0]
+
+
+# In[18]:
+
+
+df[df['LOS'] < 0].count()
+
+
+# In[21]:
+
+
+df[df['LOS'] < 0].info()
+
+
+# In[20]:
+
+
+df[df['LOS'] > 0].count()
+
+
+# In[22]:
+
+
+df[df['LOS'] > 0].info()
+
+
+# In[26]:
+
+
+# Drop the columns which I have wont use further and df[df['LOS'] > 0
+df = df[df['LOS'] > 0]
+df.drop(columns=['DISCHTIME', 'ROW_ID', 
+                'EDREGTIME', 'EDOUTTIME', 'HOSPITAL_EXPIRE_FLAG',
+                'HAS_CHARTEVENTS_DATA'], inplace=True)
+
+
+# In[27]:
+
+
+#Plot LOS Distribution
+plt.hist(df['LOS'], bins=200)
+plt.xlim(0, 50)
+plt.title('Distribution of LOS for all hospital admissions \n incl. deceased')
+plt.ylabel('Count')
+plt.xlabel('Length-of-Stay (days)')
+plt.tick_params(top=False, right=False) 
+plt.show();
+
+
+# In[29]:
+
+
+# admissions where patients died in boolean column
+df['DECEASED'] = df['DEATHTIME'].notnull().map({True:1, False:0})
+print("{} of {} patients died in the hospital".format(df['DECEASED'].sum(), 
+                                                     df['SUBJECT_ID'].nunique()))
+
+
+# In[30]:
+
+
+df['ETHNICITY'].value_counts()
+
+
+# In[31]:
+
+
+# Compress the number of ethnicity categories
+df['ETHNICITY'].replace(regex=r'^ASIAN\D*', value='ASIAN', inplace=True)
+df['ETHNICITY'].replace(regex=r'^WHITE\D*', value='WHITE', inplace=True)
+df['ETHNICITY'].replace(regex=r'^HISPANIC\D*', value='HISPANIC/LATINO', inplace=True)
+df['ETHNICITY'].replace(regex=r'^BLACK\D*', value='BLACK/AFRICAN AMERICAN', inplace=True)
+df['ETHNICITY'].replace(['UNABLE TO OBTAIN', 'OTHER', 'PATIENT DECLINED TO ANSWER', 
+                         'UNKNOWN/NOT SPECIFIED'], value='OTHER/UNKNOWN', inplace=True)
+df['ETHNICITY'].loc[~df['ETHNICITY'].isin(df['ETHNICITY'].value_counts().nlargest(5).index.tolist())] = 'OTHER/UNKNOWN'
+df['ETHNICITY'].value_counts()
+
+
+# In[38]:
+
+
+
+# Re-usable plotting function
+def plot_los_groupby(variable, size=(7,4)):
+    ''' 
+    Plot Median LOS by df categorical series name 
+    '''
+    results = df[[variable, 'LOS']].groupby(variable).median().reset_index()
+    values = list(results['LOS'].values)
+    labels = list(results[variable].values)
+
+    fig, ax = plt.subplots(figsize=size)
+    ind = range(len(results))
+    ax.barh(ind, values, align='center', height=0.6, color = '#55a868', alpha=0.8)
+    ax.set_yticks(ind)
+    ax.set_yticklabels(labels)
+    ax.set_xlabel('Median Length of Stay (days)')
+    ax.tick_params(left=False, top=False, right=False) 
+    ax.set_title('Comparison of {} labels'.format(variable))
+    
+    plt.tight_layout()
+    plt.show();
+
+
+# In[35]:
+
+
+
+
+
+# In[36]:
+
+
+# Re-usable boxplot function
+def boxplot_los_groupby(variable, los_range=(-1, 30), size=(8,4)):
+    ''' 
+    Boxplot of LOS by df categorical series name 
+    '''
+    results = df[[variable, 'LOS']].groupby(variable).median().reset_index()
+
+    categories = results[variable].values.tolist()
+
+    hist_data = []
+    for cat in categories:
+        hist_data.append(df['LOS'].loc[df[variable]==cat].values)
+
+    fig, ax = plt.subplots(figsize=size)
+    ax.boxplot(hist_data, 0, '', vert=False)
+    ax.set_xlim(los_range)
+    ax.set_yticklabels(categories)
+    ax.set_xlabel('Length of Stay (days)')
+    ax.tick_params(left=False, right=False) 
+    ax.set_title('Comparison of {} categories'.format(variable))
+    plt.tight_layout()
+    plt.show();
+
+boxplot_los_groupby('ETHNICITY', los_range=(-1, 30))
+
+
+# In[37]:
+
+
+df['ADMISSION_TYPE'].value_counts()
+
+
+# In[39]:
+
+
+boxplot_los_groupby('ADMISSION_TYPE', los_range=(-5, 35), size=(7, 4))
+
+
+# In[40]:
+
+
+df['INSURANCE'].value_counts()
+
+
+# In[41]:
+
+
+df['MARITAL_STATUS'].value_counts(dropna=False)
+
+
+# In[42]:
+
+
+#Fix NaNs and file under 'UNKNOWN'
+df['MARITAL_STATUS'] = df['MARITAL_STATUS'].fillna('UNKNOWN (DEFAULT)')
+df['MARITAL_STATUS'].value_counts(dropna=False)
+
+
+# In[43]:
+
+
+#ICUSTAYS.csv
+print('There are {} unique ICD9 codes in this dataset.'.format(df_diagcode['ICD9_CODE'].value_counts().count()))
+
+
+# In[44]:
+
+
+# Filter out E and V codes 
+df_diagcode['recode'] = df_diagcode['ICD9_CODE']
+df_diagcode['recode'] = df_diagcode['recode'][~df_diagcode['recode'].str.contains("[a-zA-Z]").fillna(False)]
+df_diagcode['recode'].fillna(value='999', inplace=True)
+
+
+# In[45]:
+
+
+# recode icd9 codes
+df_diagcode['recode'] = df_diagcode['recode'].str.slice(start=0, stop=3, step=1)
+df_diagcode['recode'] = df_diagcode['recode'].astype(int)
+
+
+# In[46]:
+
+
+# ICD-9 Main Category ranges
+icd9_ranges = [(1, 140), (140, 240), (240, 280), (280, 290), (290, 320), (320, 390), 
+               (390, 460), (460, 520), (520, 580), (580, 630), (630, 680), (680, 710),
+               (710, 740), (740, 760), (760, 780), (780, 800), (800, 1000), (1000, 2000)]
+
+# Associated category names
+diag_dict = {0: 'infectious', 1: 'neoplasms', 2: 'endocrine', 3: 'blood',
+             4: 'mental', 5: 'nervous', 6: 'circulatory', 7: 'respiratory',
+             8: 'digestive', 9: 'genitourinary', 10: 'pregnancy', 11: 'skin', 
+             12: 'muscular', 13: 'congenital', 14: 'prenatal', 15: 'misc',
+             16: 'injury', 17: 'misc'}
+
+# Re-code in terms of integer
+for num, cat_range in enumerate(icd9_ranges):
+    df_diagcode['recode'] = np.where(df_diagcode['recode'].between(cat_range[0],cat_range[1]), 
+            num, df_diagcode['recode'])
+    
+# Convert integer to category name using diag_dict
+df_diagcode['recode'] = df_diagcode['recode']
+df_diagcode['cat'] = df_diagcode['recode'].replace(diag_dict)
+
+
+# In[47]:
+
+
+df_diagcode.info()
+
+
+# In[50]:
+
+
+df_diagcode.head()
+
+
+# In[51]:
+
+
+# Create list of diagnoses for each admission
+hadm_list = df_diagcode.groupby('HADM_ID')['cat'].apply(list).reset_index()
+hadm_list.head()
+
+
+# In[52]:
+
+
+# Convert diagnoses list into hospital admission-item matrix
+hadm_item = pd.get_dummies(hadm_list['cat'].apply(pd.Series).stack()).sum(level=0)
+hadm_item.head()
+
+
+# In[53]:
+
+
+# Join back with HADM_ID, will merge with main admissions DF later
+hadm_item = hadm_item.join(hadm_list['HADM_ID'], how="outer")
+hadm_item.head()
+
+
+# In[54]:
+
+
+# Merge with main admissions df
+df = df.merge(hadm_item, how='inner', on='HADM_ID')
+
+
+# In[55]:
+
+
+#Median LOS by diagnosis category
+diag_cat_list = ['skin', 'infectious',  'misc', 'genitourinary', 'neoplasms', 'blood', 'respiratory', 
+                  'congenital','nervous', 'muscular', 'digestive', 'mental', 'endocrine', 'injury',
+                 'circulatory', 'prenatal',  'pregnancy']
+
+results = []
+for variable in diag_cat_list:
+    results.append(df[[variable, 'LOS']].groupby(variable).median().reset_index().values[1][1])
+
+sns.set(style="whitegrid")
+#sns.set_style("ticks")
+fig, ax = plt.subplots(figsize=(7,5))
+ind = range(len(results))
+ax.barh(ind, results, align='edge', alpha=0.8)
+ax.set_yticks(ind)
+ax.set_yticklabels(diag_cat_list)
+ax.set_xlabel('Median Length of Stay (days)')
+ax.tick_params(left=False, right=False, top=False) 
+ax.set_title('Comparison of Diagnoses'.format(variable))
+plt.show();
+
+
+# In[56]:
+
+
+#patients.csv
+df_pat['GENDER'].value_counts()
+
+
+# In[57]:
+
+
+# Convert to datetime type
+df_pat['DOB'] = pd.to_datetime(df_pat['DOB'])
+
+
+# In[58]:
+
+
+df_pat = df_pat[['SUBJECT_ID', 'DOB', 'GENDER']]
+
+
+# In[59]:
+
+
+df = df.merge(df_pat, how='inner', on='SUBJECT_ID')
+
+
+# In[60]:
+
+
+# Find the first admission time for each patient
+df_age_min = df[['SUBJECT_ID', 'ADMITTIME']].groupby('SUBJECT_ID').min().reset_index()
+df_age_min.columns = ['SUBJECT_ID', 'ADMIT_MIN']
+
+
+# In[61]:
+
+
+df = df.merge(df_age_min, how='outer', on='SUBJECT_ID')
+
+
+# In[62]:
+
+
+# Age is decode by finding the difference in admission date and date of birth
+df['ADMIT_MIN'] = pd.to_datetime(df['ADMIT_MIN'], errors='coerce').dt.date
+
+
+# In[63]:
+
+
+df['DOB'] = pd.to_datetime(df['DOB'], errors='coerce').dt.date
+df['age']=(df['ADMIT_MIN'] - df['DOB']).astype('timedelta64[D]')
+
+df['age']=(df['ADMIT_MIN'] - df['DOB']).astype('timedelta64[D]').dt.days//365
+
+
+# In[64]:
+
+
+df['age'] = np.where(df['age'] < 0, 90, df['age'])
+
+
+# In[65]:
+
+
+#df['age'] = np.where(df['age'] == -0, 0, df['age'])
+df['age'].isnull().sum()
+
+
+# In[66]:
+
+
+
+plt.hist(df['age'], bins=20 )
+plt.ylabel('Count')
+plt.xlabel('Age (years)')
+plt.title('Distribution of Age in MIMIC-III')
+plt.tick_params(left=False, bottom=False, top=False, right=False) 
+plt.show();
+
+
+# In[67]:
+
+
+# age vs length of stay
+plt.scatter(df['age'], df['LOS'], alpha=0.005)
+#plt.yscale('sqrt')
+plt.ylabel('LOS (days)')
+plt.xlabel('Age (years)')
+plt.title('Age versus Length-of-stay')
+plt.ylim(1, 50)
+
+
+# In[68]:
+
+
+age_ranges = [(0, 13), (13, 36), (36, 56), (56, 100)]
+for num, cat_range in enumerate(age_ranges):
+    df['age'] = np.where(df['age'].between(cat_range[0],cat_range[1]), 
+            num, df['age'])
+    
+age_dict = {0: 'newborn', 1: 'young_adult', 2: 'middle_adult', 3: 'senior'}
+df['age'] = df['age'].replace(age_dict)
+df.age.value_counts()
+
+
+# In[69]:
+
+
+#ICUSTAYS exploration
+df_icu['HADM_ID'].nunique()
+
+
+# In[71]:
+
+
+
+df_icu.groupby('FIRST_CAREUNIT').median()
+
+
+# In[73]:
+
+
+df_icu['FIRST_CAREUNIT'].replace({'CCU': 'ICU', 'CSRU': 'ICU', 'MICU': 'ICU',
+                                  'SICU': 'ICU', 'TSICU': 'ICU'}, inplace=True)
+
+
+# In[74]:
+
+
+
+df_icu['cat'] = df_icu['FIRST_CAREUNIT']
+icu_list = df_icu.groupby('HADM_ID')['cat'].apply(list).reset_index()
+
+
+# In[75]:
+
+
+df_icu['FIRST_CAREUNIT'].value_counts()
+
+
+# In[76]:
+
+
+icu_item = pd.get_dummies(icu_list['cat'].apply(pd.Series).stack()).sum(level=0)
+icu_item[icu_item >= 1] = 1
+icu_item = icu_item.join(icu_list['HADM_ID'], how="outer")
+
+
+# In[77]:
+
+
+# Merge ICU data with main dataFrame
+df = df.merge(icu_item, how='outer', on='HADM_ID')
+
+
+# In[78]:
+
+
+
+# Replace NaNs with 0
+df['ICU'].fillna(value=0, inplace=True)
+df['NICU'].fillna(value=0, inplace=True)
+
+
+# In[79]:
+
+
+def mimic_los_cleanup(adm_csv='ADMISSIONS.csv', patients_csv='PATIENTS.csv',
+                      diagcode_csv='DIAGNOSES_ICD.csv', icu_csv='ICUSTAYS.csv',
+                      verbose=True):
+     # Import CSV tables
+    df = pd.read_csv(adm_csv)
+    df_pat = pd.read_csv(patients_csv)
+    df_diagcode = pd.read_csv(diagcode_csv)
+    df_icu = pd.read_csv(icu_csv)
+    if verbose: 
+        print('(1/5) Completed .csv imports')
+        
+    # Feature Engineering for Length of Stay (LOS) target variable
+    # Convert admission and discharge times to datatime type
+    df['ADMITTIME'] = pd.to_datetime(df['ADMITTIME'])
+    df['DISCHTIME'] = pd.to_datetime(df['DISCHTIME'])
+    # Convert timedelta type into float 'days', 86400 seconds in a day
+    df['LOS'] = (df['DISCHTIME'] - df['ADMITTIME']).dt.total_seconds()/86400
+    
+    # Drop columns that are not needed for next steps
+    df.drop(columns=['DISCHTIME', 'ROW_ID', 
+                    'EDREGTIME', 'EDOUTTIME', 'HOSPITAL_EXPIRE_FLAG',
+                    'HAS_CHARTEVENTS_DATA'], inplace=True)
+    
+    # Track patients who died at the hospital by admission event
+    df['DECEASED'] = df['DEATHTIME'].notnull().map({True:1, False:0})
+    
+    # Hospital LOS metrics
+    actual_mean_los = df['LOS'].loc[df['DECEASED'] == 0].mean() 
+    actual_median_los = df['LOS'].loc[df['DECEASED'] == 0].median() 
+    
+    # Compress the number of ethnicity categories
+    df['ETHNICITY'].replace(regex=r'^ASIAN\D*', value='ASIAN', inplace=True)
+    df['ETHNICITY'].replace(regex=r'^WHITE\D*', value='WHITE', inplace=True)
+    df['ETHNICITY'].replace(regex=r'^HISPANIC\D*', value='HISPANIC/LATINO', inplace=True)
+    df['ETHNICITY'].replace(regex=r'^BLACK\D*', value='BLACK/AFRICAN AMERICAN', inplace=True)
+    df['ETHNICITY'].replace(['UNABLE TO OBTAIN', 'OTHER', 'PATIENT DECLINED TO ANSWER', 
+                             'UNKNOWN/NOT SPECIFIED'], value='OTHER/UNKNOWN', inplace=True)
+    df['ETHNICITY'].loc[~df['ETHNICITY'].isin(df['ETHNICITY'].value_counts().nlargest(5).index.tolist())] = 'OTHER/UNKNOWN'
+
+    # Reduce categories to terms of religious or not
+    df['RELIGION'].loc[~df['RELIGION'].isin(['NOT SPECIFIED', 'UNOBTAINABLE'])] = 'RELIGIOUS'
+
+    # Re-categorize NaNs into 'Unknown'
+    df['MARITAL_STATUS'] = df['MARITAL_STATUS'].fillna('UNKNOWN (DEFAULT)')
+    
+    if verbose: 
+        print('(2/5) Completed ADMISSIONS.csv cleanup and feature engineering.')
+        
+    # Feature Engineering for ICD9 code categories
+    # Filter out E and V codes since processing will be done on the numeric first 3 values
+    df_diagcode['recode'] = df_diagcode['ICD9_CODE']
+    df_diagcode['recode'] = df_diagcode['recode'][~df_diagcode['recode'].str.contains("[a-zA-Z]").fillna(False)]
+    df_diagcode['recode'].fillna(value='999', inplace=True)
+    df_diagcode['recode'] = df_diagcode['recode'].str.slice(start=0, stop=3, step=1)
+    df_diagcode['recode'] = df_diagcode['recode'].astype(int)
+    
+    # ICD-9 Main Category ranges
+    icd9_ranges = [(1, 140), (140, 240), (240, 280), (280, 290), (290, 320), (320, 390), 
+                   (390, 460), (460, 520), (520, 580), (580, 630), (630, 680), (680, 710),
+                   (710, 740), (740, 760), (760, 780), (780, 800), (800, 1000), (1000, 2000)]
+
+    # Associated category names
+    diag_dict = {0: 'infectious', 1: 'neoplasms', 2: 'endocrine', 3: 'blood',
+                 4: 'mental', 5: 'nervous', 6: 'circulatory', 7: 'respiratory',
+                 8: 'digestive', 9: 'genitourinary', 10: 'pregnancy', 11: 'skin', 
+                 12: 'muscular', 13: 'congenital', 14: 'prenatal', 15: 'misc',
+                 16: 'injury', 17: 'misc'}
+
+    # Re-code in terms of integer
+    for num, cat_range in enumerate(icd9_ranges):
+        df_diagcode['recode'] = np.where(df_diagcode['recode'].between(cat_range[0],cat_range[1]), 
+                num, df_diagcode['recode'])
+
+    # Convert integer to category name using diag_dict
+    df_diagcode['recode'] = df_diagcode['recode']
+    df_diagcode['cat'] = df_diagcode['recode'].replace(diag_dict)
+    
+    # Create list of diagnoses for each admission
+    hadm_list = df_diagcode.groupby('HADM_ID')['cat'].apply(list).reset_index()
+    
+    # Convert diagnoses list into hospital admission-item matrix
+    hadm_item = pd.get_dummies(hadm_list['cat'].apply(pd.Series).stack()).sum(level=0)
+    
+    # Join back with HADM_ID, will merge with main admissions DF later
+    hadm_item = hadm_item.join(hadm_list['HADM_ID'], how="outer")
+
+    # Merge with main admissions df
+    df = df.merge(hadm_item, how='inner', on='HADM_ID')
+    
+    if verbose: 
+        print('(3/5) Completed DIAGNOSES_ICD.csv cleanup and feature engineering.')
+    
+    # Feature Engineering for Age and Gender
+    # Convert to datetime type
+    df_pat['DOB'] = pd.to_datetime(df_pat['DOB'])
+    df_pat = df_pat[['SUBJECT_ID', 'DOB', 'GENDER']]
+    df = df.merge(df_pat, how='inner', on='SUBJECT_ID')
+    
+    # Find the first admission time for each patient
+    df_age_min = df[['SUBJECT_ID', 'ADMITTIME']].groupby('SUBJECT_ID').min().reset_index()
+    df_age_min.columns = ['SUBJECT_ID', 'ADMIT_MIN']
+    df = df.merge(df_age_min, how='outer', on='SUBJECT_ID')
+    
+    # Age is decode by finding the difference in admission date and date of birth
+    df['ADMIT_MIN'] = pd.to_datetime(df['ADMIT_MIN'], errors='coerce').dt.date
+    df['DOB'] = pd.to_datetime(df['DOB'], errors='coerce').dt.date
+    df['age']=(df['ADMIT_MIN'] - df['DOB']).astype('timedelta64[D]')
+    df['age']=(df['ADMIT_MIN'] - df['DOB']).astype('timedelta64[D]').dt.days//365
+    df['age'] = np.where(df['age'] < 0, 90, df['age'])
+    
+    # Create age categories
+    age_ranges = [(0, 13), (13, 36), (36, 56), (56, 100)]
+    for num, cat_range in enumerate(age_ranges):
+        df['age'] = np.where(df['age'].between(cat_range[0],cat_range[1]), 
+                num, df['age'])
+    age_dict = {0: 'newborn', 1: 'young_adult', 2: 'middle_adult', 3: 'senior'}
+    df['age'] = df['age'].replace(age_dict)
+    
+    # Re-map Gender to boolean type
+    df['GENDER'].replace({'M': 0, 'F':1}, inplace=True)
+    
+    if verbose: 
+        print('(4/5) Completed PATIENT.csv cleanup and feature engineering.')
+    
+    # Feature engineering for Intensive Care Unit (ICU) category
+    # Reduce ICU categories to just ICU or NICU
+    df_icu['FIRST_CAREUNIT'].replace({'CCU': 'ICU', 'CSRU': 'ICU', 'MICU': 'ICU',
+                                  'SICU': 'ICU', 'TSICU': 'ICU'}, inplace=True)
+    df_icu['cat'] = df_icu['FIRST_CAREUNIT']
+    icu_list = df_icu.groupby('HADM_ID')['cat'].apply(list).reset_index()
+    icu_item = pd.get_dummies(icu_list['cat'].apply(pd.Series).stack()).sum(level=0)
+    icu_item[icu_item >= 1] = 1
+    icu_item = icu_item.join(icu_list['HADM_ID'], how="outer")
+    df = df.merge(icu_item, how='outer', on='HADM_ID')
+    
+    # Cleanup NaNs
+    df['ICU'].fillna(value=0, inplace=True)
+    df['NICU'].fillna(value=0, inplace=True)
+    
+    if verbose: 
+        print('(5/5) Completed ICUSTAYS.csv cleanup and feature engineering.')
+        
+    # Remove deceased persons as they will skew LOS result
+    df = df[df['DECEASED'] == 0]
+
+    # Remove LOS with negative number, likely entry form error
+    df = df[df['LOS'] > 0]    
+    
+    # Drop unused columns, e.g. not used to predict LOS
+    df.drop(columns=['SUBJECT_ID', 'HADM_ID', 'ADMITTIME', 'ADMISSION_LOCATION',
+                'DISCHARGE_LOCATION', 'LANGUAGE', 'ADMIT_MIN', 'DOB',
+                'DIAGNOSIS', 'DECEASED', 'DEATHTIME'], inplace=True)
+    
+    prefix_cols = ['ADM', 'INS', 'REL', 'ETH', 'AGE', 'MAR']
+    dummy_cols = ['ADMISSION_TYPE', 'INSURANCE', 'RELIGION',
+                 'ETHNICITY', 'age', 'MARITAL_STATUS']
+    df = pd.get_dummies(df, prefix=prefix_cols, columns=dummy_cols)
+    
+    if verbose: 
+        print('Data Preprocessing complete.')
+    
+    return df, actual_median_los, actual_mean_los
+
+df_clean, actual_median_los, actual_mean_los = mimic_los_cleanup(adm_csv='D:\mimic\ADMISSIONS.csv', 
+                                                                 patients_csv='D:\mimic\PATIENTS.csv',
+                                                                 diagcode_csv='D:\mimic\DIAGNOSES_ICD.csv', 
+                                                                 icu_csv='D:\mimic\ICUSTAYS.csv')
+
+
+# In[80]:
+
+
+df.info()
+
+
+# In[81]:
+
+
+# Remove deceased persons
+df = df[df['DECEASED'] == 0]
+
+# Remove LOS with negative number
+df = df[df['LOS'] > 0]
+
+
+# In[82]:
+
+
+# Drop unused or no longer needed columns
+df.drop(columns=['SUBJECT_ID', 'HADM_ID', 'ADMITTIME', 'ADMISSION_LOCATION',
+                'DISCHARGE_LOCATION', 'LANGUAGE', 'ADMIT_MIN', 'DOB',
+                'DIAGNOSIS', 'DECEASED',  'DEATHTIME'], inplace=True)
+
+
+# In[83]:
+
+
+df.info()
+
+
+# In[84]:
+
+
+# Create dummy columns for categorical variables
+prefix_cols = ['ADM', 'INS', 'REL', 'ETH', 'AGE', 'MAR', 'RELIGION']
+dummy_cols = ['ADMISSION_TYPE', 'INSURANCE', 'RELIGION',
+             'ETHNICITY', 'age', 'MARITAL_STATUS', 'RELIGION']
+df = pd.get_dummies(df, prefix=prefix_cols, columns=dummy_cols)
+df.info()
+
+
+# In[85]:
+
+
+df_clean.info(verbose=1)
+
+
+# In[86]:
+
+
+# Target Variable (Length-of-Stay)
+LOS = df_clean['LOS'].values
+# Prediction Features
+features = df_clean.drop(columns=['LOS'])
+
+
+# In[87]:
+
+
+# Split into train 80% and test 20%
+X_train, X_test, y_train, y_test = train_test_split(features, 
+                                                    LOS, 
+                                                    test_size = .20, 
+                                                    random_state = 0)
+
+# Show the results of the split
+print("Training set has {} samples.".format(X_train.shape[0]))
+print("Testing set has {} samples.".format(X_test.shape[0]))
+
+
+# In[88]:
+
+
+# Regression models for comparison
+models = [SGDRegressor(random_state = 0), 
+          GradientBoostingRegressor(random_state = 0), 
+          LinearRegression(),
+          KNeighborsRegressor(),
+          RandomForestRegressor(random_state = 0)]
+
+results = {}
+
+
+# In[89]:
+
+
+for model in models:
+    
+    # Instantiate and fit Regressor Model
+    reg_model = model
+    reg_model.fit(X_train, y_train)
+    
+    # Make predictions with model
+    y_test_preds = reg_model.predict(X_test)
+    
+    # Grab model name and store results associated with model
+    name = str(model).split("(")[0]
+
+    results[name] = r2_score(y_test, y_test_preds)
+    print('{} done.'.format(name))
+
+
+# In[91]:
+
+
+# R2 score results
+fig, ax = plt.subplots()
+ind = range(len(results))
+ax.barh(ind, list(results.values()), align='center', 
+        color = '#55a868', alpha=0.8)
+ax.set_yticks(ind)
+ax.set_yticklabels(results.keys())
+ax.set_xlabel('R-squared score')
+ax.tick_params(left=False, top=False, right=False) 
+ax.set_title('Comparison of Regression Models')
+
+
+# In[92]:
+
+
+# GradientBoostingRegressor will be used as the LOS prediction model
+reg_model = GradientBoostingRegressor(random_state=0)   
+reg_model.fit(X_train, y_train)
+y_test_preds = reg_model.predict(X_test)
+r2_not_refined = r2_score(y_test, y_test_preds)
+print("R2 score is: {:2f}".format(r2_not_refined))
+
+
+# In[93]:
+
+
+# Split into train 80% and test 20%
+X_train, X_test, y_train, y_test = train_test_split(features, 
+                                                    LOS, 
+                                                    test_size = .20, 
+                                                    random_state = 42)
+
+# Set the parameters by cross-validation
+#tuned_parameters = [{'n_estimators': [100, 200, 300],
+#                     'max_depth' : [2, 3, 4],
+#                     'loss': ['ls', 'lad', 'huber']}]
+tuned_parameters = [{'n_estimators': [200, 300],
+                     'max_depth' : [3, 4],
+                     'loss': ['ls', 'lad']}]
+
+# create and fit a ridge regression model, testing each alpha
+reg_model = GradientBoostingRegressor()  
+grid = GridSearchCV(reg_model, tuned_parameters)
+grid.fit(X_train, y_train)
+reg_model_optimized = grid.best_estimator_
+
+# summarize the results of the grid search
+print(grid.best_score_)
+print(grid.best_estimator_)
+
+
+# In[94]:
+
+
+#reg_model = GradientBoostingRegressor(n_estimators = 200, max_depth=4, random_state=0)   
+#reg_model.fit(X_train, y_train)
+y_test_preds = reg_model_optimized.predict(X_test)
+r2_optimized = r2_score(y_test, y_test_preds)
+print("Optimized R2 score is: {:2f}".format(r2_optimized))
+
+
+# In[95]:
+
+
+feature_imp = pd.DataFrame(reg_model_optimized.feature_importances_,
+                                   index = X_train.columns,
+                                   columns=['importance']).sort_values('importance', ascending=False)
+
+feature_imp.head(10)
+
+
+# In[96]:
+
+
+feature_imp.index[0:10].tolist()
+
+
+# In[98]:
+
+
+# Plot feature importance
+fig, ax = plt.subplots(figsize=(7, 5))
+ind = range(0,10)
+ax.barh(ind, feature_imp['importance'].values[0:10], 
+        align='center', alpha=0.9)
+ax.set_yticks(ind)
+ax.set_yticklabels(feature_imp.index[0:10].tolist())
+ax.tick_params(left=False, top=False, right=False) 
+ax.set_title("Top 10 features for predicting LOS")
+ax.set_xlabel('Feature Importance Coefficient \n(GradientBoostingRegressor)')
+plt.gca().invert_yaxis()
+
+
+# In[100]:
+
+
+ml_count, md_count, avg_count  = 0, 0, 0
+ml_days, md_days, avg_days  = 0, 0, 0
+ml_days_rms, md_days_rms, avg_days_rms  = 0, 0, 0
+
+for i in range(y_test_preds.shape[0]):
+    ml_model = abs(y_test_preds[i] - y_test[i])
+    median_model = abs(actual_median_los - y_test[i])
+    average_model = abs(actual_mean_los - y_test[i])
+    
+    ml_days += ml_model
+    md_days += median_model
+    avg_days += average_model
+    
+    ml_model_rms = (y_test_preds[i] - y_test[i])**2
+    median_model_rms = (actual_median_los - y_test[i])**2
+    average_model_rms = (actual_mean_los - y_test[i])**2
+    
+    ml_days_rms += ml_model_rms
+    md_days_rms += median_model_rms
+    avg_days_rms += average_model_rms
+
+print("Prediction Model days {}".format(ml_days/y_test_preds.shape[0]))
+print("Median Model days {}".format(md_days/y_test_preds.shape[0]))
+print("Average Model days {}".format(avg_days/y_test_preds.shape[0]))
+
+print("Prediction Model RMS {}".format((ml_days_rms**0.5)/y_test_preds.shape[0]))
+print("Median Model RMS {}".format((md_days_rms**0.5)/y_test_preds.shape[0]))
+print("Average Model RMS {}".format((avg_days_rms**0.5)/y_test_preds.shape[0]))
+
+
+# In[102]:
+
+
+#RMSE plot 
+data = pd.DataFrame({'RMSE': [(ml_days_rms**0.5)/y_test_preds.shape[0], 
+                             (avg_days_rms**0.5)/y_test_preds.shape[0],
+                             (md_days_rms**0.5)/y_test_preds.shape[0]],
+                     'LOS Model Type': ['Gradient Boosting', 'Average', 'Median'] })
+
+fig, ax = plt.subplots()
+ax = sns.barplot(x='RMSE', y='LOS Model Type', data=data)
+ax.set_title('RMSE comparison of Length-of-Stay models')
+ax.tick_params(top=False, left=False, right=False)
+
+
+# In[ ]:
+
+
+
+
+
